@@ -60,3 +60,10 @@ class RegionError(Error):
             "This LocalstackSession is configured for region %s, not %s"
             % (should_be_region, region_name)
         )
+
+
+class UnsupportedLocalstackVersion(Error):
+    def __init__(self):
+        super(UnsupportedLocalstackVersion, self).__init__(
+            "This pytest-localstack version can be used with localstack 0.11+ only"
+        )
