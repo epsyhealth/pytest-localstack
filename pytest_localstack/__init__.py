@@ -1,10 +1,8 @@
 import contextlib
 import logging
 import sys
-import warnings
 
 import docker
-
 import pytest
 
 from pytest_localstack import constants, plugin, session, utils
