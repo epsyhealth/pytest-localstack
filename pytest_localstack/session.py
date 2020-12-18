@@ -15,6 +15,8 @@ from pytest_localstack import (
     service_checks,
     utils,
 )
+from pytest_localstack.exceptions import UnsupportedLocalstackVersion
+from pytest_localstack.services import SERVICES
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +43,7 @@ class RunningSession:
         if self.localstack_version != "latest" and utils.get_version_tuple(
             localstack_version
         ) < utils.get_version_tuple("0.11"):
-            self.service_ports = constants.LEGACY_SERVICE_PORTS
-        else:
-            self.service_ports = constants.SERVICE_PORTS
+            raise UnsupportedLocalstackVersion()
 
         plugin.manager.hook.contribute_to_session(session=self)
         # If no region was provided, use what botocore defaulted to.
@@ -54,23 +54,13 @@ class RunningSession:
             )
 
         if services is None:
-            self.services = copy(self.service_ports)
+            self.services = SERVICES.keys()
         elif isinstance(services, (list, tuple, set)):
-            self.services = {}
             for service_name in services:
-                try:
-                    port = self.service_ports[service_name]
-                except KeyError:
+                if service_name not in SERVICES:
                     raise exceptions.ServiceError("unknown service " + service_name)
-                self.services[service_name] = port
-        elif isinstance(services, dict):
-            self.services = {}
-            for service_name, port in services.items():
-                if service_name not in self.service_ports:
-                    raise exceptions.ServiceError("unknown service " + service_name)
-                if port is None:
-                    port = self.service_ports[service_name]
-                self.services[service_name] = port
+
+            self.services = list(services)
         else:
             raise TypeError("unsupported services type: %r" % (services,))
 
@@ -82,13 +72,7 @@ class RunningSession:
     @property
     def service_aliases(self):
         """Return a full list of possible names supported."""
-        services = set(self.services)
-        result = set()
-        for alias, service_name in constants.SERVICE_ALIASES.items():
-            if service_name in services:
-                result.add(service_name)
-                result.add(alias)
-        return result
+        return set(self.services)
 
     def start(self, timeout=60):
         """Starts Localstack if needed."""
@@ -127,7 +111,7 @@ class RunningSession:
                 services
             ):  # list() because set may change during iteration
                 try:
-                    service_checks.SERVICE_CHECKS[service_name](self)
+                    SERVICES[service_name].check(self)
                     services.discard(service_name)
                 except exceptions.ServiceError as e:
                     if (time.time() - start_time) >= timeout:
@@ -167,12 +151,8 @@ class RunningSession:
 
     def service_hostname(self, service_name):
         """Get hostname and port for an AWS service."""
-        service_name = constants.SERVICE_ALIASES.get(service_name, service_name)
-        if service_name not in self.services:
-            raise exceptions.ServiceError(
-                "{0!r} does not have {1} enabled".format(self, service_name)
-            )
-        port = self.map_port(self.services[service_name])
+        port = self.map_port(4566)
+
         return "%s:%i" % (self.hostname, port)
 
     def endpoint_url(self, service_name):
@@ -249,6 +229,7 @@ class LocalstackSession(RunningSession):
         pull_image=True,
         container_name=None,
         use_ssl=False,
+        localstack_api_key=None,
         **kwargs
     ):
         self._container = None
@@ -273,6 +254,7 @@ class LocalstackSession(RunningSession):
         self.container_log_level = container_log_level
         self.localstack_version = localstack_version
         self.container_name = container_name or generate_container_name()
+        self.localstack_api_key = localstack_api_key
 
     def start(self, timeout=60):
         """Start the Localstack container.
@@ -302,23 +284,34 @@ class LocalstackSession(RunningSession):
 
         start_time = time.time()
 
-        services = ",".join("%s:%s" % pair for pair in self.services.items())
+        services = ",".join(self.services)
         kinesis_error_probability = "%f" % self.kinesis_error_probability
         dynamodb_error_probability = "%f" % self.dynamodb_error_probability
         use_ssl = str(self.use_ssl).lower()
+
+        print(services)
+
+        environment = {
+            "DEFAULT_REGION": self.region_name,
+            "SERVICES": services,
+            "KINESIS_ERROR_PROBABILITY": kinesis_error_probability,
+            "DYNAMODB_ERROR_PROBABILITY": dynamodb_error_probability,
+            "USE_SSL": use_ssl,
+        }
+
+        if self.localstack_api_key:
+            environment["LOCALSTACK_API_KEY"] = self.localstack_api_key
+
+
+
+        logger.info("Starting localstack container")
         self._container = self.docker_client.containers.run(
             image_name,
             name=self.container_name,
             detach=True,
             auto_remove=self.auto_remove,
-            environment={
-                "DEFAULT_REGION": self.region_name,
-                "SERVICES": services,
-                "KINESIS_ERROR_PROBABILITY": kinesis_error_probability,
-                "DYNAMODB_ERROR_PROBABILITY": dynamodb_error_probability,
-                "USE_SSL": use_ssl,
-            },
-            ports={port: None for port in self.services.values()},
+            environment=environment,
+            ports={4566: None},
         )
         logger.debug(
             "Started Localstack container %s (id: %s)",
